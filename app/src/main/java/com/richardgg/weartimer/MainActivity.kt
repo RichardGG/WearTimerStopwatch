@@ -17,12 +17,23 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Text
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -230,57 +241,87 @@ private fun PillButton(label: String, color: Color, onClick: () -> Unit) {
     }
 }
 
-/** A single digit: swipe up to increase, swipe down to decrease (wraps around). */
+/**
+ * A single digit wheel: swipe up to increase, swipe down to decrease (wraps around).
+ * The wheel follows the finger and eases back into place on release.
+ */
 @Composable
 private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
-    val stepPx = with(LocalDensity.current) { 24.dp.toPx() }
-    var accum by remember { mutableStateOf(0f) }
+    val rowDp = 28.dp
+    val rowPx = with(LocalDensity.current) { rowDp.toPx() }
+    val scope = rememberCoroutineScope()
+    var offset by remember { mutableStateOf(0f) }
+    var settle by remember { mutableStateOf<Job?>(null) }
     var active by remember { mutableStateOf(false) }
     val current by rememberUpdatedValue(value)
+    val size = max + 1
+    fun wrap(v: Int) = ((v % size) + size) % size
 
-    Column(
+    fun release() {
+        active = false
+        settle?.cancel()
+        settle = scope.launch {
+            animate(offset, 0f, animationSpec = spring(stiffness = Spring.StiffnessMedium)) { v, _ ->
+                offset = v
+            }
+        }
+    }
+
+    Box(
         Modifier
             .width(22.dp)
-            .height(64.dp)
+            .height(rowDp * 3)
+            .clip(RectangleShape)
             .pointerInput(max) {
                 detectVerticalDragGestures(
-                    onDragStart = { active = true },
-                    onDragEnd = { active = false; accum = 0f },
-                    onDragCancel = { active = false; accum = 0f },
+                    onDragStart = { active = true; settle?.cancel() },
+                    onDragEnd = { release() },
+                    onDragCancel = { release() },
                 ) { change, drag ->
                     change.consume()
-                    accum += drag
-                    while (accum <= -stepPx) {
-                        accum += stepPx
-                        onChange(if (current >= max) 0 else current + 1)
+                    offset += drag
+                    // Swiping up moves the next number into the centre.
+                    while (offset <= -rowPx / 2) {
+                        offset += rowPx
+                        onChange(wrap(current + 1))
                     }
-                    while (accum >= stepPx) {
-                        accum -= stepPx
-                        onChange(if (current <= 0) max else current - 1)
+                    while (offset >= rowPx / 2) {
+                        offset -= rowPx
+                        onChange(wrap(current - 1))
                     }
                 }
             },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = (if (value >= max) 0 else value + 1).toString(),
-            color = Dim.copy(alpha = 0.4f),
-            fontSize = 14.sp,
-        )
-        Text(
-            text = value.toString(),
-            color = if (active) Accent else Color.White,
-            fontSize = 26.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.size(width = 22.dp, height = 32.dp),
-            textAlign = TextAlign.Center,
-        )
-        Text(
-            text = (if (value <= 0) max else value - 1).toString(),
-            color = Dim.copy(alpha = 0.4f),
-            fontSize = 14.sp,
-        )
+        Box(
+            Modifier
+                .requiredHeight(rowDp * 5)
+                .width(22.dp)
+                .offset { IntOffset(0, offset.roundToInt()) },
+        ) {
+            for (i in -2..2) {
+                // 0 at the centre row, 1 or more once a row is a full step away.
+                val dist = (kotlin.math.abs(i * rowPx + offset) / rowPx).coerceAtMost(1f)
+                Text(
+                    text = wrap(value + i).toString(),
+                    color = if (active && dist < 0.5f) Accent else Color.White,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = rowDp * (i + 2))
+                        .width(22.dp)
+                        .height(rowDp)
+                        .graphicsLayer {
+                            val sc = 1f - 0.45f * dist
+                            scaleX = sc
+                            scaleY = sc
+                            alpha = 1f - 0.7f * dist
+                        },
+                )
+            }
+        }
     }
 }
 

@@ -15,6 +15,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -511,12 +513,29 @@ private fun TimerPage(
         }
         Spacer(2)
         if (t.mode == Mode.Idle) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            var swiping by remember { mutableStateOf(false) }
+            val labelAlpha by animateFloatAsState(if (swiping) 0f else 1f, tween(150), label = "labels")
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 for (i in 0 until 6) {
-                    DigitPicker(t.digits[i], DigitMax[i]) { t.digits[i] = it }
+                    DigitPicker(
+                        t.digits[i], DigitMax[i],
+                        modifier = Modifier.weight(1f),
+                        onActive = { swiping = it },
+                    ) { t.digits[i] = it }
                     if (i == 1 || i == 3) Colon()
                 }
             }
+            UnitLabels(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp)
+                    .graphicsLayer { alpha = labelAlpha },
+            )
             Spacer(2)
             Text(
                 text = if (t.setSeconds > 0) "Ends " + formatTime(clock + t.setSeconds * 1000)
@@ -570,7 +589,22 @@ private fun Spacer(h: Int) = Box(Modifier.height(h.dp))
 
 @Composable
 private fun Colon() {
-    Text(":", color = Dim, fontSize = 22.sp, modifier = Modifier.padding(horizontal = 1.dp))
+    Box(Modifier.width(ColonWidth), contentAlignment = Alignment.Center) {
+        Text(":", color = Dim, fontSize = 22.sp)
+    }
+}
+
+private val ColonWidth = 8.dp
+
+/** "hr  min  sec" captions under the wheels, lined up with each pair of digits. */
+@Composable
+private fun UnitLabels(modifier: Modifier = Modifier) {
+    Row(modifier) {
+        for ((i, label) in listOf("hr", "min", "sec").withIndex()) {
+            if (i > 0) Box(Modifier.width(ColonWidth))
+            Text(label, color = Dim, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.weight(2f))
+        }
+    }
 }
 
 @Composable
@@ -589,23 +623,33 @@ private fun PillButton(label: String, color: Color, onClick: () -> Unit) {
 
 /**
  * A single digit wheel: swipe up to increase, swipe down to decrease (wraps around).
+ * At rest only the current digit shows; the numbers above and below appear while swiping.
  * The wheel follows the finger and eases back into place on release.
  */
 @Composable
-private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
-    val rowDp = 24.dp
+private fun DigitPicker(
+    value: Int,
+    max: Int,
+    modifier: Modifier = Modifier,
+    onActive: (Boolean) -> Unit = {},
+    onChange: (Int) -> Unit,
+) {
+    val rowDp = 30.dp
     val rowPx = with(LocalDensity.current) { rowDp.toPx() }
     val scope = rememberCoroutineScope()
     var offset by remember { mutableStateOf(0f) }
     var settle by remember { mutableStateOf<Job?>(null) }
     var active by remember { mutableStateOf(false) }
+    val reveal by animateFloatAsState(if (active) 1f else 0f, tween(150), label = "reveal")
     val current by rememberUpdatedState(value)
     val onChangeNow by rememberUpdatedState(onChange)
+    val onActiveNow by rememberUpdatedState(onActive)
     val size = max + 1
     fun wrap(v: Int) = ((v % size) + size) % size
 
     fun release() {
         active = false
+        onActiveNow(false)
         settle?.cancel()
         settle = scope.launch {
             animate(offset, 0f, animationSpec = spring(stiffness = Spring.StiffnessMedium)) { v, _ ->
@@ -614,14 +658,13 @@ private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
         }
     }
 
+    // Not clipped, so the neighbouring numbers can fade in above and below while swiping.
     Box(
-        Modifier
-            .width(22.dp)
-            .height(rowDp * 3)
-            .clip(RectangleShape)
+        modifier
+            .height(40.dp)
             .pointerInput(max) {
                 detectVerticalDragGestures(
-                    onDragStart = { active = true; settle?.cancel() },
+                    onDragStart = { active = true; onActiveNow(true); settle?.cancel() },
                     onDragEnd = { release() },
                     onDragCancel = { release() },
                 ) { change, drag ->
@@ -643,30 +686,31 @@ private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
         Box(
             Modifier
                 .requiredHeight(rowDp * 5)
-                .width(22.dp)
+                .fillMaxWidth()
                 .offset { IntOffset(0, offset.roundToInt()) },
         ) {
             for (i in -2..2) {
                 // 0 at the centre row, 1 or more once a row is a full step away.
                 val dist = (abs(i * rowPx + offset) / rowPx).coerceAtMost(1f)
+                val visibility = if (i == 0) 1f else reveal
                 Box(
                     Modifier
                         .align(Alignment.TopCenter)
                         .offset(y = rowDp * (i + 2))
-                        .width(22.dp)
+                        .fillMaxWidth()
                         .height(rowDp)
                         .graphicsLayer {
-                            val sc = 1f - 0.45f * dist
+                            val sc = 1f - 0.4f * dist
                             scaleX = sc
                             scaleY = sc
-                            alpha = 1f - 0.7f * dist
+                            alpha = (1f - 0.7f * dist) * visibility
                         },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = wrap(value + i).toString(),
                         color = if (active && dist < 0.5f) Accent else Color.White,
-                        fontSize = 22.sp,
+                        fontSize = 28.sp,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,
                         modifier = Modifier.wrapContentHeight(unbounded = true),

@@ -16,11 +16,25 @@ android {
         versionName = "1.$run"
     }
 
+    // CI supplies a persistent keystore so every release has the same signature
+    // and can be installed over the previous one. Without it, fall back to the
+    // debug key (fine for local builds, but its signature differs per machine).
+    val ciKeystore = System.getenv("KEYSTORE_PATH")?.takeIf { file(it).exists() }
+    signingConfigs {
+        if (ciKeystore != null) {
+            create("ci") {
+                storeFile = file(ciKeystore)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so the APK can be sideloaded directly.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (ciKeystore != null) "ci" else "debug")
         }
     }
     compileOptions {

@@ -283,6 +283,26 @@ private fun App(requestName: (String, (String) -> Unit) -> Unit) {
         }
     }
 
+    // Show running timers on the watch face / recents as an ongoing activity.
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            timers.filter { it.mode == Mode.Running }
+                .map { listOf(it.name, it.isTimer, it.segmentStart, it.baseMs, it.totalMs) }
+        }.collect {
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val nowWall = System.currentTimeMillis()
+            val running = timers.filter { it.mode == Mode.Running }.map { t ->
+                val elapsed = t.elapsedMs(nowElapsed)
+                RunningInfo(
+                    name = t.name,
+                    isTimer = t.isTimer,
+                    referenceMs = if (t.isTimer) nowWall + (t.totalMs - elapsed) else nowWall - elapsed,
+                )
+            }
+            runCatching { OngoingTimers.update(context, running) }
+        }
+    }
+
     // One ticker drives every timer and the clock.
     LaunchedEffect(Unit) {
         while (true) {

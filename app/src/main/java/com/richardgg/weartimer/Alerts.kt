@@ -1,16 +1,12 @@
 package com.richardgg.weartimer
 
 import android.app.AlarmManager
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import java.util.concurrent.ConcurrentHashMap
 
-private const val CHANNEL = "timer_alerts"
 private const val EXTRA_ID = "id"
 private const val EXTRA_NAME = "name"
 
@@ -54,31 +50,13 @@ object Alerts {
         ctx.getSystemService(AlarmManager::class.java).cancel(alarmIntent(ctx, id))
     }
 
-    fun clearNotifications(ctx: Context) {
-        ctx.getSystemService(NotificationManager::class.java).cancelAll()
-    }
+    /** Silence any ringing alarm. */
+    fun stopRinging(ctx: Context) = AlarmService.stop(ctx)
 
-    /** Post the vibrating "time's up" notification (once per run of a timer). */
+    /** Start ringing for timer [id] (once per run of a timer). */
     fun fire(ctx: Context, id: Int, name: String) {
         if (!fired.add(id)) return
-        val nm = ctx.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Timer alerts", NotificationManager.IMPORTANCE_HIGH).apply {
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 500, 250, 500, 250, 500, 250, 500)
-            },
-        )
-        nm.notify(
-            id,
-            Notification.Builder(ctx, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                .setContentTitle(name)
-                .setContentText("Time's up")
-                .setCategory(Notification.CATEGORY_ALARM)
-                .setAutoCancel(true)
-                .setContentIntent(openApp(ctx))
-                .build(),
-        )
+        AlarmService.start(ctx, name)
     }
 }
 

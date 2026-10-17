@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -123,9 +124,15 @@ class MainActivity : ComponentActivity() {
         nameInput.launch(intent)
     }
 
+    // Touching the app silences a ringing alarm.
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) Alerts.stopRinging(this)
+        return super.dispatchTouchEvent(ev)
+    }
+
     override fun onStart() {
         super.onStart()
-        Alerts.clearNotifications(this)
+        Alerts.stopRinging(this)
     }
 }
 

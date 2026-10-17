@@ -7,6 +7,9 @@ import android.os.Vibrator
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -15,48 +18,66 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Text
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.IntOffset
-import kotlin.math.roundToInt
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val Accent = Color(0xFF4FD1C5)
 private val Dim = Color(0xFF8A8F98)
 private val Danger = Color(0xFFFF6B6B)
+private val Card = Color(0xFF1B1B1F)
 
 private enum class Mode { Idle, Running, Paused, Finished }
 
@@ -64,7 +85,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        setContent { TimerScreen(onFinished = ::buzz) }
+        setContent { App(onFinished = ::buzz) }
     }
 
     @Suppress("DEPRECATION")
@@ -77,144 +98,391 @@ class MainActivity : ComponentActivity() {
 /** Max value of each digit: H H : M M : S S */
 private val DigitMax = intArrayOf(9, 9, 5, 9, 5, 9)
 
-@Composable
-private fun TimerScreen(onFinished: () -> Unit) {
-    val digits = remember { mutableStateListOf(0, 0, 0, 0, 0, 0) }
-    var mode by remember { mutableStateOf(Mode.Idle) }
-    var isTimer by remember { mutableStateOf(false) }
-    var totalMs by remember { mutableStateOf(0L) }
-    // Elapsed time accumulated before the current run segment started.
-    var baseMs by remember { mutableStateOf(0L) }
-    var segmentStart by remember { mutableStateOf(0L) }
-    var shownMs by remember { mutableStateOf(0L) }
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+/** A single timer / stopwatch page. */
+@Stable
+private class TimerState(val letter: String) {
+    val digits = mutableStateListOf(0, 0, 0, 0, 0, 0)
+    var customName by mutableStateOf<String?>(null)
+    var lockedName by mutableStateOf("")
+    var mode by mutableStateOf(Mode.Idle)
+    var isTimer by mutableStateOf(false)
+    var totalMs by mutableLongStateOf(0L)
+    /** Elapsed time accumulated before the current run segment started. */
+    var baseMs by mutableLongStateOf(0L)
+    var segmentStart by mutableLongStateOf(0L)
 
-    val setSeconds = digits[0] * 36000L + digits[1] * 3600L + digits[2] * 600L +
-        digits[3] * 60L + digits[4] * 10L + digits[5]
+    val setSeconds: Long
+        get() = digits[0] * 36000L + digits[1] * 3600L + digits[2] * 600L +
+            digits[3] * 60L + digits[4] * 10L + digits[5]
 
-    LaunchedEffect(mode) {
-        if (mode == Mode.Running) {
-            while (true) {
-                val elapsed = baseMs + (SystemClock.elapsedRealtime() - segmentStart)
-                shownMs = elapsed
-                if (isTimer && elapsed >= totalMs) {
-                    shownMs = totalMs
-                    mode = Mode.Finished
-                    onFinished()
-                    break
-                }
-                delay(50)
-            }
-        }
-    }
-    // Keep "ends at" clock fresh while setting.
-    LaunchedEffect(mode) {
-        while (mode == Mode.Idle) {
-            now = System.currentTimeMillis()
-            delay(1000)
-        }
+    val defaultName: String
+        get() = if (setSeconds > 0) "${durationLabel(setSeconds)} timer $letter" else "Stopwatch $letter"
+
+    val name: String
+        get() = customName ?: if (mode == Mode.Idle) defaultName else lockedName
+
+    /** True once the page has been used, so a fresh blank page should be offered after it. */
+    val touched: Boolean
+        get() = mode != Mode.Idle || setSeconds > 0 || customName != null
+
+    fun elapsedMs(nowE: Long): Long =
+        if (mode == Mode.Running) baseMs + (nowE - segmentStart) else baseMs
+
+    /** Time left for a timer, time elapsed for a stopwatch. */
+    fun displayMs(nowE: Long): Long {
+        val e = elapsedMs(nowE)
+        return if (isTimer) (totalMs - e).coerceAtLeast(0) else e
     }
 
-    fun start() {
+    fun shownSeconds(nowE: Long): Long {
+        val ms = displayMs(nowE)
+        // Round up for countdowns so 00:00:00 only shows at the end.
+        return if (isTimer) (ms + 999) / 1000 else ms / 1000
+    }
+
+    fun start(nowE: Long) {
+        lockedName = defaultName
         isTimer = setSeconds > 0
         totalMs = setSeconds * 1000L
         baseMs = 0L
-        shownMs = 0L
-        segmentStart = SystemClock.elapsedRealtime()
+        segmentStart = nowE
         mode = Mode.Running
     }
 
-    fun reset() {
+    fun pause(nowE: Long) {
+        baseMs += nowE - segmentStart
+        mode = Mode.Paused
+    }
+
+    fun resume(nowE: Long) {
+        segmentStart = nowE
+        mode = Mode.Running
+    }
+
+    fun finish() {
+        baseMs = totalMs
+        mode = Mode.Finished
+    }
+
+    /** Stop and return to the setup screen, keeping the digits that were set. */
+    fun toIdle() {
         mode = Mode.Idle
-        shownMs = 0L
         baseMs = 0L
+        lockedName = ""
+    }
+
+    /** Clear the setup screen. */
+    fun clearSetup() {
+        for (i in digits.indices) digits[i] = 0
+        customName = null
+    }
+}
+
+private fun letterFor(i: Int): String =
+    ('A' + i % 26).toString() + if (i >= 26) (i / 26 + 1).toString() else ""
+
+private fun durationLabel(totalSeconds: Long): String {
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return buildString {
+        if (h > 0) append("${h}h")
+        if (m > 0) append("${m}m")
+        if (s > 0) append("${s}s")
+    }
+}
+
+private fun formatTime(ms: Long): String =
+    DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(ms))
+
+private fun formatHms(totalSeconds: Long): String {
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return "%02d:%02d:%02d".format(h, m, s)
+}
+
+@Composable
+private fun App(onFinished: () -> Unit) {
+    var counter by remember { mutableIntStateOf(1) }
+    val timers = remember { mutableStateListOf(TimerState(letterFor(0))) }
+    var nowE by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var editing by remember { mutableStateOf<TimerState?>(null) }
+    val pagerState = rememberPagerState(initialPage = 1) { timers.size + 1 }
+    val scope = rememberCoroutineScope()
+    val currentOnFinished by rememberUpdatedState(onFinished)
+
+    // Always keep a fresh blank page at the end to swipe to.
+    LaunchedEffect(Unit) {
+        snapshotFlow { timers.lastOrNull()?.touched ?: true }.collect { touched ->
+            if (touched) timers.add(TimerState(letterFor(counter++)))
+        }
+    }
+
+    // One ticker drives every timer and the clock.
+    LaunchedEffect(Unit) {
+        while (true) {
+            val n = SystemClock.elapsedRealtime()
+            nowE = n
+            clock = System.currentTimeMillis()
+            var anyRunning = false
+            for (t in timers) {
+                if (t.mode != Mode.Running) continue
+                anyRunning = true
+                if (t.isTimer && t.elapsedMs(n) >= t.totalMs) {
+                    t.finish()
+                    currentOnFinished()
+                }
+            }
+            delay(if (anyRunning) 50 else 250)
+        }
     }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black),
-        contentAlignment = Alignment.Center,
     ) {
-        when (mode) {
-            Mode.Idle -> Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    for (i in 0 until 6) {
-                        DigitPicker(digits[i], DigitMax[i]) { digits[i] = it }
-                        if (i == 1 || i == 3) Colon()
-                    }
-                }
-                Spacer(8)
-                Text(
-                    text = if (setSeconds > 0) {
-                        "Ends " + DateFormat.getTimeInstance(DateFormat.SHORT)
-                            .format(Date(now + setSeconds * 1000))
-                    } else "Swipe digits to set timer",
-                    color = if (setSeconds > 0) Accent else Dim,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(10)
-                PillButton(
-                    label = if (setSeconds > 0) "Start timer" else "Stopwatch",
-                    color = Accent,
-                ) { start() }
-            }
-
-            else -> Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                val displayMs = if (isTimer) (totalMs - shownMs).coerceAtLeast(0) else shownMs
-                // Round up for countdowns so 00:00:00 only shows at the end.
-                val secs = if (isTimer) (displayMs + 999) / 1000 else displayMs / 1000
-                Text(
-                    text = formatHms(secs),
-                    color = if (mode == Mode.Finished) Danger else Color.White,
-                    fontSize = 34.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (!isTimer) {
-                    Text(
-                        text = ".%02d".format((displayMs % 1000) / 10),
-                        color = Dim,
-                        fontSize = 16.sp,
+        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = formatTime(clock),
+                color = Dim,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                key = { p -> if (p == 0) "home" else timers.getOrNull(p - 1)?.letter ?: "page$p" },
+            ) { page ->
+                if (page == 0) {
+                    HomePage(
+                        timers = timers,
+                        nowE = nowE,
+                        onOpen = { t ->
+                            val idx = timers.indexOf(t)
+                            if (idx >= 0) scope.launch { pagerState.animateScrollToPage(idx + 1) }
+                        },
+                        onDelete = { t -> timers.remove(t) },
                     )
-                } else if (mode == Mode.Finished) {
-                    Text("Time's up", color = Danger, fontSize = 14.sp)
                 } else {
-                    val endsAt = System.currentTimeMillis() + displayMs
-                    Text(
-                        "Ends " + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(endsAt)),
-                        color = Accent,
-                        fontSize = 13.sp,
-                    )
-                }
-                Spacer(10)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (mode != Mode.Finished) {
-                        PillButton(
-                            label = if (mode == Mode.Running) "Pause" else "Resume",
-                            color = Accent,
-                        ) {
-                            if (mode == Mode.Running) {
-                                baseMs += SystemClock.elapsedRealtime() - segmentStart
-                                mode = Mode.Paused
-                            } else {
-                                segmentStart = SystemClock.elapsedRealtime()
-                                mode = Mode.Running
-                            }
-                        }
-                    }
-                    PillButton(
-                        label = if (mode == Mode.Finished) "Done" else "Reset",
-                        color = Danger,
-                    ) { reset() }
+                    val t = timers.getOrNull(page - 1)
+                    if (t != null) TimerPage(t, nowE, clock) { editing = t }
                 }
             }
+        }
+
+        editing?.let { t ->
+            NameEditor(
+                initial = t.name,
+                onCancel = { editing = null },
+                onDone = { text ->
+                    val trimmed = text.trim()
+                    t.customName = if (trimmed.isEmpty() || trimmed == t.defaultName) null else trimmed
+                    if (t.mode != Mode.Idle && t.customName == null) t.lockedName = trimmed.ifEmpty { t.lockedName }
+                    editing = null
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomePage(
+    timers: List<TimerState>,
+    nowE: Long,
+    onOpen: (TimerState) -> Unit,
+    onDelete: (TimerState) -> Unit,
+) {
+    val active = timers.filter { it.mode != Mode.Idle }
+    if (active.isEmpty()) {
+        Column(
+            Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text("No active timers", color = Color.White, fontSize = 15.sp)
+            Spacer(4)
+            Text("Swipe left to add one", color = Dim, fontSize = 12.sp)
+        }
+        return
+    }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 22.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("Active timers", color = Dim, fontSize = 12.sp)
+        for (t in active) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Card)
+                    .clickable { onOpen(t) }
+                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        t.name,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        formatHms(t.shownSeconds(nowE)),
+                        color = when (t.mode) {
+                            Mode.Finished -> Danger
+                            Mode.Paused -> Dim
+                            else -> Accent
+                        },
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        when (t.mode) {
+                            Mode.Finished -> "Time's up"
+                            Mode.Paused -> "Paused"
+                            else -> if (t.isTimer) {
+                                "Ends " + formatTime(System.currentTimeMillis() + t.displayMs(nowE))
+                            } else "Stopwatch"
+                        },
+                        color = Dim,
+                        fontSize = 10.sp,
+                    )
+                }
+                Text(
+                    "×",
+                    color = Dim,
+                    fontSize = 20.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable { onDelete(t) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TimerPage(t: TimerState, nowE: Long, clock: Long, onEditName: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = t.name,
+            color = Color.White,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .padding(horizontal = 28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onEditName)
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+        Spacer(2)
+        if (t.mode == Mode.Idle) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                for (i in 0 until 6) {
+                    DigitPicker(t.digits[i], DigitMax[i]) { t.digits[i] = it }
+                    if (i == 1 || i == 3) Colon()
+                }
+            }
+            Spacer(2)
+            Text(
+                text = if (t.setSeconds > 0) "Ends " + formatTime(clock + t.setSeconds * 1000)
+                else "Swipe digits to set a timer",
+                color = if (t.setSeconds > 0) Accent else Dim,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(6)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                PillButton("Reset", Danger) { t.clearSetup() }
+                PillButton(if (t.setSeconds > 0) "Start" else "Stopwatch", Accent) {
+                    t.start(SystemClock.elapsedRealtime())
+                }
+            }
+        } else {
+            val displayMs = t.displayMs(nowE)
+            Text(
+                text = formatHms(t.shownSeconds(nowE)),
+                color = if (t.mode == Mode.Finished) Danger else Color.White,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            if (!t.isTimer) {
+                Text(".%02d".format((displayMs % 1000) / 10), color = Dim, fontSize = 16.sp)
+            } else if (t.mode == Mode.Finished) {
+                Text("Time's up", color = Danger, fontSize = 14.sp)
+            } else {
+                Text(
+                    "Ends " + formatTime(System.currentTimeMillis() + displayMs),
+                    color = Accent,
+                    fontSize = 13.sp,
+                )
+            }
+            Spacer(8)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (t.mode != Mode.Finished) {
+                    PillButton(if (t.mode == Mode.Running) "Pause" else "Resume", Accent) {
+                        val n = SystemClock.elapsedRealtime()
+                        if (t.mode == Mode.Running) t.pause(n) else t.resume(n)
+                    }
+                }
+                PillButton(if (t.mode == Mode.Finished) "Done" else "Reset", Danger) { t.toIdle() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NameEditor(initial: String, onCancel: () -> Unit, onDone: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {}
+            .padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("Timer name", color = Dim, fontSize = 12.sp)
+        Spacer(6)
+        BasicTextField(
+            value = text,
+            onValueChange = { text = it },
+            singleLine = true,
+            textStyle = TextStyle(color = Color.White, fontSize = 16.sp, textAlign = TextAlign.Center),
+            cursorBrush = SolidColor(Accent),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { onDone(text) }),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Card)
+                .padding(10.dp)
+                .focusRequester(focus),
+        )
+        Spacer(8)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PillButton("Cancel", Dim, onCancel)
+            PillButton("OK", Accent) { onDone(text) }
         }
     }
 }
@@ -224,7 +492,7 @@ private fun Spacer(h: Int) = Box(Modifier.height(h.dp))
 
 @Composable
 private fun Colon() {
-    Text(":", color = Dim, fontSize = 24.sp, modifier = Modifier.padding(horizontal = 1.dp))
+    Text(":", color = Dim, fontSize = 22.sp, modifier = Modifier.padding(horizontal = 1.dp))
 }
 
 @Composable
@@ -234,7 +502,7 @@ private fun PillButton(label: String, color: Color, onClick: () -> Unit) {
             .clip(RoundedCornerShape(50))
             .background(color.copy(alpha = 0.2f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = color, fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -247,13 +515,14 @@ private fun PillButton(label: String, color: Color, onClick: () -> Unit) {
  */
 @Composable
 private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
-    val rowDp = 28.dp
+    val rowDp = 24.dp
     val rowPx = with(LocalDensity.current) { rowDp.toPx() }
     val scope = rememberCoroutineScope()
     var offset by remember { mutableStateOf(0f) }
     var settle by remember { mutableStateOf<Job?>(null) }
     var active by remember { mutableStateOf(false) }
-    val current by rememberUpdatedValue(value)
+    val current by rememberUpdatedState(value)
+    val onChangeNow by rememberUpdatedState(onChange)
     val size = max + 1
     fun wrap(v: Int) = ((v % size) + size) % size
 
@@ -283,11 +552,11 @@ private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
                     // Swiping up moves the next number into the centre.
                     while (offset <= -rowPx / 2) {
                         offset += rowPx
-                        onChange(wrap(current + 1))
+                        onChangeNow(wrap(current + 1))
                     }
                     while (offset >= rowPx / 2) {
                         offset -= rowPx
-                        onChange(wrap(current - 1))
+                        onChangeNow(wrap(current - 1))
                     }
                 }
             },
@@ -301,14 +570,9 @@ private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
         ) {
             for (i in -2..2) {
                 // 0 at the centre row, 1 or more once a row is a full step away.
-                val dist = (kotlin.math.abs(i * rowPx + offset) / rowPx).coerceAtMost(1f)
-                Text(
-                    text = wrap(value + i).toString(),
-                    color = if (active && dist < 0.5f) Accent else Color.White,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
+                val dist = (abs(i * rowPx + offset) / rowPx).coerceAtMost(1f)
+                Box(
+                    Modifier
                         .align(Alignment.TopCenter)
                         .offset(y = rowDp * (i + 2))
                         .width(22.dp)
@@ -319,19 +583,18 @@ private fun DigitPicker(value: Int, max: Int, onChange: (Int) -> Unit) {
                             scaleY = sc
                             alpha = 1f - 0.7f * dist
                         },
-                )
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = wrap(value + i).toString(),
+                        color = if (active && dist < 0.5f) Accent else Color.White,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.wrapContentHeight(unbounded = true),
+                    )
+                }
             }
         }
     }
-}
-
-@Composable
-private fun <T> rememberUpdatedValue(v: T) =
-    androidx.compose.runtime.rememberUpdatedState(v)
-
-private fun formatHms(totalSeconds: Long): String {
-    val h = totalSeconds / 3600
-    val m = (totalSeconds % 3600) / 60
-    val s = totalSeconds % 60
-    return "%02d:%02d:%02d".format(h, m, s)
 }

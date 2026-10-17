@@ -47,6 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -264,13 +265,33 @@ private fun App(requestName: (String, (String) -> Unit) -> Unit) {
     val timers = remember { mutableStateListOf<TimerState>().also { it.add(TimerState(0).also { t -> t.siblings = it }) } }
     var nowE by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    val pagerState = rememberPagerState(initialPage = 1) { timers.size + 1 }
+    var selectedId by remember { mutableIntStateOf(0) }
+    // Page 0 lists the timers; page 1 shows the selected one.
+    val pagerState = rememberPagerState(initialPage = 1) { 2 }
     val scope = rememberCoroutineScope()
+    val selected = timers.firstOrNull { it.id == selectedId } ?: timers.firstOrNull()
 
-    // Always keep a fresh blank page at the end to swipe to.
-    LaunchedEffect(Unit) {
-        snapshotFlow { timers.lastOrNull()?.touched ?: true }.collect { touched ->
-            if (touched) timers.add(TimerState(counter++).also { it.siblings = timers })
+    fun select(t: TimerState, showTimer: Boolean = true) {
+        selectedId = t.id
+        if (showTimer) scope.launch { pagerState.animateScrollToPage(1) }
+    }
+
+    fun addTimer() {
+        val t = TimerState(counter++).also { it.siblings = timers }
+        timers.add(t)
+        select(t)
+    }
+
+    fun removeTimer(t: TimerState) {
+        val idx = timers.indexOf(t)
+        timers.remove(t)
+        if (timers.isEmpty()) {
+            // Always keep one timer to show.
+            val fresh = TimerState(counter++).also { it.siblings = timers }
+            timers.add(fresh)
+            selectedId = fresh.id
+        } else if (t.id == selectedId) {
+            selectedId = timers[minOf(idx, timers.size - 1)].id
         }
     }
 
@@ -351,32 +372,30 @@ private fun App(requestName: (String, (String) -> Unit) -> Unit) {
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
-                key = { p -> if (p == 0) "home" else timers.getOrNull(p - 1)?.letter ?: "page$p" },
+                key = { p -> if (p == 0) "list" else "timer" },
             ) { page ->
                 if (page == 0) {
                     HomePage(
                         timers = timers,
+                        selectedId = selected?.id,
                         nowE = nowE,
-                        onOpen = { t ->
-                            val idx = timers.indexOf(t)
-                            if (idx >= 0) scope.launch { pagerState.animateScrollToPage(idx + 1) }
-                        },
-                        onDelete = { t -> timers.remove(t) },
+                        onOpen = { t -> select(t) },
+                        onAdd = { addTimer() },
+                        onDelete = { t -> removeTimer(t) },
                     )
-                } else {
-                    val t = timers.getOrNull(page - 1)
-                    if (t != null) {
+                } else if (selected != null) {
+                    key(selected.id) {
                         TimerPage(
-                            t, nowE, clock,
-                            canDelete = t !== timers.lastOrNull(),
-                            onDelete = { timers.remove(t) },
+                            selected, nowE, clock,
+                            canDelete = timers.size > 1,
+                            onDelete = { removeTimer(selected) },
                         ) {
-                            requestName(t.name) { text ->
+                            requestName(selected.name) { text ->
                                 val trimmed = text.trim()
-                                t.customName =
-                                    if (trimmed.isEmpty() || trimmed == t.defaultName) null else trimmed
-                                if (t.mode != Mode.Idle && t.customName == null && trimmed.isNotEmpty()) {
-                                    t.lockedName = trimmed
+                                selected.customName =
+                                    if (trimmed.isEmpty() || trimmed == selected.defaultName) null else trimmed
+                                if (selected.mode != Mode.Idle && selected.customName == null && trimmed.isNotEmpty()) {
+                                    selected.lockedName = trimmed
                                 }
                             }
                         }
@@ -390,23 +409,12 @@ private fun App(requestName: (String, (String) -> Unit) -> Unit) {
 @Composable
 private fun HomePage(
     timers: List<TimerState>,
+    selectedId: Int?,
     nowE: Long,
     onOpen: (TimerState) -> Unit,
+    onAdd: () -> Unit,
     onDelete: (TimerState) -> Unit,
 ) {
-    val active = timers.filter { it.mode != Mode.Idle }
-    if (active.isEmpty()) {
-        Column(
-            Modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text("No active timers", color = Color.White, fontSize = 15.sp)
-            Spacer(4)
-            Text("Swipe left to add one", color = Dim, fontSize = 12.sp)
-        }
-        return
-    }
     Column(
         Modifier
             .fillMaxSize()
@@ -415,13 +423,13 @@ private fun HomePage(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("Active timers", color = Dim, fontSize = 12.sp)
-        for (t in active) {
+        PillButton("+ Add timer", Accent, onAdd)
+        for (t in timers) {
             Row(
                 Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .background(Card)
+                    .background(if (t.id == selectedId) Color(0xFF26323A) else Card)
                     .clickable { onOpen(t) }
                     .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -435,17 +443,18 @@ private fun HomePage(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        formatHms(t.shownSeconds(nowE)),
+                        formatHms(if (t.mode == Mode.Idle) t.setSeconds else t.shownSeconds(nowE)),
                         color = when (t.mode) {
                             Mode.Finished -> Danger
-                            Mode.Paused -> Dim
-                            else -> Accent
+                            Mode.Running -> Accent
+                            else -> Dim
                         },
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
                         when (t.mode) {
+                            Mode.Idle -> "Not started"
                             Mode.Finished -> "Time's up"
                             Mode.Paused -> "Paused"
                             else -> if (t.isTimer) {

@@ -1,12 +1,15 @@
 package com.richardgg.weartimer
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import android.os.VibrationEffect
-import android.os.Vibrator
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
@@ -82,16 +85,23 @@ private val Card = Color(0xFF1B1B1F)
 private enum class Mode { Idle, Running, Paused, Finished }
 
 class MainActivity : ComponentActivity() {
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        setContent { App(onFinished = ::buzz) }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        setContent { App() }
     }
 
-    @Suppress("DEPRECATION")
-    private fun buzz() {
-        val v = getSystemService(VIBRATOR_SERVICE) as? Vibrator ?: return
-        v.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 200, 400, 200, 400), -1))
+    override fun onStart() {
+        super.onStart()
+        Alerts.clearNotifications(this)
     }
 }
 
@@ -100,7 +110,8 @@ private val DigitMax = intArrayOf(9, 9, 5, 9, 5, 9)
 
 /** A single timer / stopwatch page. */
 @Stable
-private class TimerState(val letter: String) {
+private class TimerState(val id: Int) {
+    val letter = letterFor(id)
     val digits = mutableStateListOf(0, 0, 0, 0, 0, 0)
     var customName by mutableStateOf<String?>(null)
     var lockedName by mutableStateOf("")
@@ -203,20 +214,41 @@ private fun formatHms(totalSeconds: Long): String {
 }
 
 @Composable
-private fun App(onFinished: () -> Unit) {
+private fun App() {
+    val context = LocalContext.current
     var counter by remember { mutableIntStateOf(1) }
-    val timers = remember { mutableStateListOf(TimerState(letterFor(0))) }
+    val timers = remember { mutableStateListOf(TimerState(0)) }
     var nowE by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var editing by remember { mutableStateOf<TimerState?>(null) }
     val pagerState = rememberPagerState(initialPage = 1) { timers.size + 1 }
     val scope = rememberCoroutineScope()
-    val currentOnFinished by rememberUpdatedState(onFinished)
 
     // Always keep a fresh blank page at the end to swipe to.
     LaunchedEffect(Unit) {
         snapshotFlow { timers.lastOrNull()?.touched ?: true }.collect { touched ->
-            if (touched) timers.add(TimerState(letterFor(counter++)))
+            if (touched) timers.add(TimerState(counter++))
+        }
+    }
+
+    // Keep a wake-up alarm scheduled for every running countdown so it alerts in the background.
+    LaunchedEffect(Unit) {
+        val scheduled = mutableMapOf<Int, Triple<String, Long, Long>>()
+        snapshotFlow {
+            timers.filter { it.mode == Mode.Running && it.isTimer }
+                .associate { it.id to Triple(it.name, it.segmentStart, it.totalMs - it.baseMs) }
+        }.collect { running ->
+            for ((id, spec) in running) {
+                if (scheduled[id] == spec) continue
+                val (name, segmentStart, remaining) = spec
+                val left = remaining - (SystemClock.elapsedRealtime() - segmentStart)
+                Alerts.schedule(context, id, name, System.currentTimeMillis() + left.coerceAtLeast(0))
+                scheduled[id] = spec
+            }
+            for (id in scheduled.keys.filter { it !in running }) {
+                Alerts.cancel(context, id)
+                scheduled.remove(id)
+            }
         }
     }
 
@@ -232,7 +264,7 @@ private fun App(onFinished: () -> Unit) {
                 anyRunning = true
                 if (t.isTimer && t.elapsedMs(n) >= t.totalMs) {
                     t.finish()
-                    currentOnFinished()
+                    Alerts.fire(context, t.id, t.name)
                 }
             }
             delay(if (anyRunning) 50 else 250)

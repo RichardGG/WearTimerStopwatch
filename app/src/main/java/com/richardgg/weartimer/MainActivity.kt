@@ -142,6 +142,8 @@ private val DigitMax = intArrayOf(9, 9, 5, 9, 5, 9)
 /** A single timer / stopwatch page. */
 @Stable
 private class TimerState(val id: Int) {
+    /** The shared timer list, used to keep default names unique. */
+    var siblings: List<TimerState> = emptyList()
     val letter = letterFor(id)
     val digits = mutableStateListOf(0, 0, 0, 0, 0, 0)
     var customName by mutableStateOf<String?>(null)
@@ -157,8 +159,15 @@ private class TimerState(val id: Int) {
         get() = digits[0] * 36000L + digits[1] * 3600L + digits[2] * 600L +
             digits[3] * 60L + digits[4] * 10L + digits[5]
 
+    /** "20m timer" / "Stopwatch", with " (2)", " (3)"... if an earlier timer already has that name. */
     val defaultName: String
-        get() = if (setSeconds > 0) "${durationLabel(setSeconds)} timer $letter" else "Stopwatch $letter"
+        get() {
+            val base = if (setSeconds > 0) "${durationLabel(setSeconds)} timer" else "Stopwatch"
+            val taken = siblings.takeWhile { it !== this }.filter { it.touched }.map { it.name }
+            var n = 1
+            while ((if (n == 1) base else "$base ($n)") in taken) n++
+            return if (n == 1) base else "$base ($n)"
+        }
 
     val name: String
         get() = customName ?: if (mode == Mode.Idle) defaultName else lockedName
@@ -249,7 +258,7 @@ private fun formatHms(totalSeconds: Long): String {
 private fun App(requestName: (String, (String) -> Unit) -> Unit) {
     val context = LocalContext.current
     var counter by remember { mutableIntStateOf(1) }
-    val timers = remember { mutableStateListOf(TimerState(0)) }
+    val timers = remember { mutableStateListOf<TimerState>().also { it.add(TimerState(0).also { t -> t.siblings = it }) } }
     var nowE by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val pagerState = rememberPagerState(initialPage = 1) { timers.size + 1 }
@@ -258,7 +267,7 @@ private fun App(requestName: (String, (String) -> Unit) -> Unit) {
     // Always keep a fresh blank page at the end to swipe to.
     LaunchedEffect(Unit) {
         snapshotFlow { timers.lastOrNull()?.touched ?: true }.collect { touched ->
-            if (touched) timers.add(TimerState(counter++))
+            if (touched) timers.add(TimerState(counter++).also { it.siblings = timers })
         }
     }
 
@@ -354,7 +363,11 @@ private fun App(requestName: (String, (String) -> Unit) -> Unit) {
                 } else {
                     val t = timers.getOrNull(page - 1)
                     if (t != null) {
-                        TimerPage(t, nowE, clock) {
+                        TimerPage(
+                            t, nowE, clock,
+                            canDelete = t !== timers.lastOrNull(),
+                            onDelete = { timers.remove(t) },
+                        ) {
                             requestName(t.name) { text ->
                                 val trimmed = text.trim()
                                 t.customName =
@@ -455,24 +468,47 @@ private fun HomePage(
 }
 
 @Composable
-private fun TimerPage(t: TimerState, nowE: Long, clock: Long, onEditName: () -> Unit) {
+private fun TimerPage(
+    t: TimerState,
+    nowE: Long,
+    clock: Long,
+    canDelete: Boolean,
+    onDelete: () -> Unit,
+    onEditName: () -> Unit,
+) {
     Column(
         Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(
-            text = t.name,
-            color = Color.White,
-            fontSize = 12.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .padding(horizontal = 28.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onEditName)
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-        )
+        Row(
+            Modifier.padding(horizontal = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = t.name,
+                color = Color.White,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onEditName)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+            if (canDelete) {
+                Text(
+                    "×",
+                    color = Dim,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClick = onDelete)
+                        .padding(horizontal = 8.dp),
+                )
+            }
+        }
         Spacer(2)
         if (t.mode == Mode.Idle) {
             Row(verticalAlignment = Alignment.CenterVertically) {

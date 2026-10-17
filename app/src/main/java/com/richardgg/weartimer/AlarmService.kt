@@ -10,8 +10,6 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
-import android.media.MediaPlayer
-import android.media.RingtoneManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -24,7 +22,7 @@ private const val ALARM_NOTIFICATION_ID = 1000
 private const val RING_TIMEOUT_MS = 60_000L
 
 /**
- * Rings like an alarm clock: loops the alarm sound and vibration, and shows a full-screen
+ * Rings like an alarm clock: loops a vibration (sound is currently disabled), and shows a full-screen
  * "Time's up" screen over the lock screen until dismissed (or a minute passes).
  */
 class AlarmService : Service() {
@@ -48,7 +46,6 @@ class AlarmService : Service() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -60,7 +57,7 @@ class AlarmService : Service() {
         }
         ringing.add(intent?.getStringExtra(EXTRA_NAME) ?: "Timer")
         startForeground(ALARM_NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        if (player == null && vibrator == null) startRinging()
+        if (vibrator == null) startRinging()
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({ stopSelf() }, RING_TIMEOUT_MS)
         return START_NOT_STICKY
@@ -107,24 +104,10 @@ class AlarmService : Service() {
         vibrator = getSystemService(Vibrator::class.java)?.also {
             it.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 700, 400), 0), attrs)
         }
-        // Watches without a speaker (or without an alarm tone) still get the vibration.
-        player = try {
-            MediaPlayer().apply {
-                setAudioAttributes(attrs)
-                setDataSource(this@AlarmService, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
-                isLooping = true
-                prepare()
-                start()
-            }
-        } catch (e: Exception) {
-            null
-        }
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        player?.release()
-        player = null
         vibrator?.cancel()
         vibrator = null
         ringing.clear()

@@ -1,6 +1,8 @@
 package com.richardgg.weartimer
 
 import android.Manifest
+import android.app.RemoteInput
+import androidx.wear.input.RemoteInputIntentHelper
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -97,7 +99,28 @@ class MainActivity : ComponentActivity() {
         ) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        setContent { App() }
+        setContent { App(requestName = ::requestName) }
+    }
+
+    private var nameCallback: ((String) -> Unit)? = null
+    private val nameInput =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val data = result.data
+            if (result.resultCode == RESULT_OK && data != null) {
+                RemoteInput.getResultsFromIntent(data)?.getCharSequence("name")?.toString()
+                    ?.let { nameCallback?.invoke(it) }
+            }
+        }
+
+    /** Opens the watch's system text entry (keyboard / voice / handwriting). */
+    private fun requestName(initial: String, onResult: (String) -> Unit) {
+        nameCallback = onResult
+        val intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+        RemoteInputIntentHelper.putRemoteInputsExtra(
+            intent,
+            listOf(RemoteInput.Builder("name").setLabel(initial).build()),
+        )
+        nameInput.launch(intent)
     }
 
     override fun onStart() {
@@ -216,13 +239,12 @@ private fun formatHms(totalSeconds: Long): String {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun App() {
+private fun App(requestName: (String, (String) -> Unit) -> Unit) {
     val context = LocalContext.current
     var counter by remember { mutableIntStateOf(1) }
     val timers = remember { mutableStateListOf(TimerState(0)) }
     var nowE by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    var editing by remember { mutableStateOf<TimerState?>(null) }
     val pagerState = rememberPagerState(initialPage = 1) { timers.size + 1 }
     val scope = rememberCoroutineScope()
 
@@ -304,22 +326,20 @@ private fun App() {
                     )
                 } else {
                     val t = timers.getOrNull(page - 1)
-                    if (t != null) TimerPage(t, nowE, clock) { editing = t }
+                    if (t != null) {
+                        TimerPage(t, nowE, clock) {
+                            requestName(t.name) { text ->
+                                val trimmed = text.trim()
+                                t.customName =
+                                    if (trimmed.isEmpty() || trimmed == t.defaultName) null else trimmed
+                                if (t.mode != Mode.Idle && t.customName == null && trimmed.isNotEmpty()) {
+                                    t.lockedName = trimmed
+                                }
+                            }
+                        }
+                    }
                 }
             }
-        }
-
-        editing?.let { t ->
-            NameEditor(
-                initial = t.name,
-                onCancel = { editing = null },
-                onDone = { text ->
-                    val trimmed = text.trim()
-                    t.customName = if (trimmed.isEmpty() || trimmed == t.defaultName) null else trimmed
-                    if (t.mode != Mode.Idle && t.customName == null) t.lockedName = trimmed.ifEmpty { t.lockedName }
-                    editing = null
-                },
-            )
         }
     }
 }
@@ -478,45 +498,6 @@ private fun TimerPage(t: TimerState, nowE: Long, clock: Long, onEditName: () -> 
                 }
                 PillButton(if (t.mode == Mode.Finished) "Done" else "Reset", Danger) { t.toIdle() }
             }
-        }
-    }
-}
-
-@Composable
-private fun NameEditor(initial: String, onCancel: () -> Unit, onDone: (String) -> Unit) {
-    var text by remember { mutableStateOf(initial) }
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .pointerInput(Unit) {}
-            .padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text("Timer name", color = Dim, fontSize = 12.sp)
-        Spacer(6)
-        BasicTextField(
-            value = text,
-            onValueChange = { text = it },
-            singleLine = true,
-            textStyle = TextStyle(color = Color.White, fontSize = 16.sp, textAlign = TextAlign.Center),
-            cursorBrush = SolidColor(Accent),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { onDone(text) }),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(Card)
-                .padding(10.dp)
-                .focusRequester(focus),
-        )
-        Spacer(8)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton("Cancel", Dim, onCancel)
-            PillButton("OK", Accent) { onDone(text) }
         }
     }
 }

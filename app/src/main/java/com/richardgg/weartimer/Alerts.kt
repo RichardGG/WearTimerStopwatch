@@ -37,8 +37,17 @@ object Alerts {
     fun schedule(ctx: Context, id: Int, name: String, triggerAtMs: Long) {
         fired.remove(id)
         val am = ctx.getSystemService(AlarmManager::class.java)
-        // setAlarmClock is exact, survives Doze and needs no special permission.
-        am.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtMs, openApp(ctx)), alarmIntent(ctx, id, name))
+        val pi = alarmIntent(ctx, id, name)
+        try {
+            if (am.canScheduleExactAlarms()) {
+                am.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtMs, openApp(ctx)), pi)
+            } else {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pi)
+            }
+        } catch (e: SecurityException) {
+            // Never crash the app over a missing alarm permission; fall back to an inexact alarm.
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pi)
+        }
     }
 
     fun cancel(ctx: Context, id: Int) {

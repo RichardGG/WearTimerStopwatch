@@ -60,6 +60,13 @@ class AlarmService : Service() {
         }
         ringing.add(intent?.getStringExtra(EXTRA_NAME) ?: "Timer")
         startForeground(ALARM_NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        // Open the alarm screen directly. Android only allows this from the background if the app
+        // has the "display over other apps" permission; otherwise the full-screen notification
+        // above is the fallback.
+        try {
+            startActivity(Intent(this, AlarmActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+        }
         if (player == null && vibrator == null) startRinging()
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({ stopSelf() }, RING_TIMEOUT_MS)

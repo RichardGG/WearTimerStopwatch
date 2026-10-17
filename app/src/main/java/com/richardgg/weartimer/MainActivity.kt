@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -478,6 +479,25 @@ private fun TimerPage(
     onDelete: () -> Unit,
     onEditName: () -> Unit,
 ) {
+    val wheels = remember { List(6) { WheelState() } }
+    Box(Modifier.fillMaxSize()) {
+        // Behind the controls, so buttons and the name stay tappable but any other
+        // touch on the page can swipe the wheels.
+        if (t.mode == Mode.Idle) SwipeSurface(t, wheels)
+        TimerPageContent(t, nowE, clock, canDelete, onDelete, onEditName, wheels)
+    }
+}
+
+@Composable
+private fun TimerPageContent(
+    t: TimerState,
+    nowE: Long,
+    clock: Long,
+    canDelete: Boolean,
+    onDelete: () -> Unit,
+    onEditName: () -> Unit,
+    wheels: List<WheelState>,
+) {
     Column(
         Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -513,27 +533,23 @@ private fun TimerPage(
         }
         Spacer(2)
         if (t.mode == Mode.Idle) {
-            var swiping by remember { mutableStateOf(false) }
+            val swiping = wheels.any { it.active }
             val labelAlpha by animateFloatAsState(if (swiping) 0f else 1f, tween(150), label = "labels")
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp),
+                    .padding(horizontal = PagePadding),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 for (i in 0 until 6) {
-                    DigitPicker(
-                        t.digits[i], DigitMax[i],
-                        modifier = Modifier.weight(1f),
-                        onActive = { swiping = it },
-                    ) { t.digits[i] = it }
+                    DigitWheel(t.digits[i], DigitMax[i], wheels[i], Modifier.weight(1f))
                     if (i == 1 || i == 3) Colon()
                 }
             }
             UnitLabels(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp)
+                    .padding(horizontal = PagePadding)
                     .graphicsLayer { alpha = labelAlpha },
             )
             Spacer(2)
@@ -621,84 +637,110 @@ private fun PillButton(label: String, color: Color, onClick: () -> Unit) {
     }
 }
 
+/** Drag state of one digit wheel. */
+@Stable
+private class WheelState {
+    var offset by mutableFloatStateOf(0f)
+    var active by mutableStateOf(false)
+    var settle: Job? = null
+}
+
+private val RowHeight = 30.dp
+private val PagePadding = 6.dp
+
 /**
- * A single digit wheel: swipe up to increase, swipe down to decrease (wraps around).
- * At rest only the current digit shows; the numbers above and below appear while swiping.
- * The wheel follows the finger and eases back into place on release.
+ * Catches vertical swipes anywhere on the page and applies them to the digit under the
+ * finger's column. Swiping up moves the next number into the centre; values wrap around.
  */
 @Composable
-private fun DigitPicker(
-    value: Int,
-    max: Int,
-    modifier: Modifier = Modifier,
-    onActive: (Boolean) -> Unit = {},
-    onChange: (Int) -> Unit,
-) {
-    val rowDp = 30.dp
-    val rowPx = with(LocalDensity.current) { rowDp.toPx() }
+private fun SwipeSurface(t: TimerState, wheels: List<WheelState>) {
     val scope = rememberCoroutineScope()
-    var offset by remember { mutableStateOf(0f) }
-    var settle by remember { mutableStateOf<Job?>(null) }
-    var active by remember { mutableStateOf(false) }
-    val reveal by animateFloatAsState(if (active) 1f else 0f, tween(150), label = "reveal")
-    val current by rememberUpdatedState(value)
-    val onChangeNow by rememberUpdatedState(onChange)
-    val onActiveNow by rememberUpdatedState(onActive)
-    val size = max + 1
-    fun wrap(v: Int) = ((v % size) + size) % size
-
-    fun release() {
-        active = false
-        onActiveNow(false)
-        settle?.cancel()
-        settle = scope.launch {
-            animate(offset, 0f, animationSpec = spring(stiffness = Spring.StiffnessMedium)) { v, _ ->
-                offset = v
-            }
-        }
-    }
-
-    // Not clipped, so the neighbouring numbers can fade in above and below while swiping.
     Box(
-        modifier
-            .height(40.dp)
-            .pointerInput(max) {
+        Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                val rowPx = RowHeight.toPx()
+                val pad = PagePadding.toPx()
+                val colon = ColonWidth.toPx()
+                var sel = 0
+
+                // Which digit's column is x in? Digits share the width left after the colons.
+                fun digitAt(x: Float): Int {
+                    val digitW = (size.width - 2 * pad - 2 * colon) / 6f
+                    val rel = x - pad
+                    for (i in 0 until 6) {
+                        val start = i * digitW + (i / 2) * colon
+                        if (rel < start + digitW + colon / 2) return i
+                    }
+                    return 5
+                }
+
+                fun release(w: WheelState) {
+                    w.active = false
+                    w.settle?.cancel()
+                    w.settle = scope.launch {
+                        animate(w.offset, 0f, animationSpec = spring(stiffness = Spring.StiffnessMedium)) { v, _ ->
+                            w.offset = v
+                        }
+                    }
+                }
+
                 detectVerticalDragGestures(
-                    onDragStart = { active = true; onActiveNow(true); settle?.cancel() },
-                    onDragEnd = { release() },
-                    onDragCancel = { release() },
+                    onDragStart = { pos ->
+                        sel = digitAt(pos.x)
+                        wheels[sel].active = true
+                        wheels[sel].settle?.cancel()
+                    },
+                    onDragEnd = { release(wheels[sel]) },
+                    onDragCancel = { release(wheels[sel]) },
                 ) { change, drag ->
                     change.consume()
-                    offset += drag
-                    // Swiping up moves the next number into the centre.
-                    while (offset <= -rowPx / 2) {
-                        offset += rowPx
-                        onChangeNow(wrap(current + 1))
+                    val w = wheels[sel]
+                    val max = DigitMax[sel]
+                    val n = max + 1
+                    w.offset += drag
+                    while (w.offset <= -rowPx / 2) {
+                        w.offset += rowPx
+                        t.digits[sel] = (t.digits[sel] + 1) % n
                     }
-                    while (offset >= rowPx / 2) {
-                        offset -= rowPx
-                        onChangeNow(wrap(current - 1))
+                    while (w.offset >= rowPx / 2) {
+                        w.offset -= rowPx
+                        t.digits[sel] = (t.digits[sel] - 1 + n) % n
                     }
                 }
             },
-        contentAlignment = Alignment.Center,
-    ) {
+    )
+}
+
+/**
+ * A single digit wheel. At rest only the current digit shows; the numbers above and below
+ * appear while swiping. The wheel follows the finger and eases back into place on release.
+ */
+@Composable
+private fun DigitWheel(value: Int, max: Int, wheel: WheelState, modifier: Modifier = Modifier) {
+    val rowPx = with(LocalDensity.current) { RowHeight.toPx() }
+    val reveal by animateFloatAsState(if (wheel.active) 1f else 0f, tween(150), label = "reveal")
+    val size = max + 1
+    fun wrap(v: Int) = ((v % size) + size) % size
+
+    // Not clipped, so the neighbouring numbers can fade in above and below while swiping.
+    Box(modifier.height(40.dp), contentAlignment = Alignment.Center) {
         Box(
             Modifier
-                .requiredHeight(rowDp * 5)
+                .requiredHeight(RowHeight * 5)
                 .fillMaxWidth()
-                .offset { IntOffset(0, offset.roundToInt()) },
+                .offset { IntOffset(0, wheel.offset.roundToInt()) },
         ) {
             for (i in -2..2) {
                 // 0 at the centre row, 1 or more once a row is a full step away.
-                val dist = (abs(i * rowPx + offset) / rowPx).coerceAtMost(1f)
+                val dist = (abs(i * rowPx + wheel.offset) / rowPx).coerceAtMost(1f)
                 val visibility = if (i == 0) 1f else reveal
                 Box(
                     Modifier
                         .align(Alignment.TopCenter)
-                        .offset(y = rowDp * (i + 2))
+                        .offset(y = RowHeight * (i + 2))
                         .fillMaxWidth()
-                        .height(rowDp)
+                        .height(RowHeight)
                         .graphicsLayer {
                             val sc = 1f - 0.4f * dist
                             scaleX = sc
@@ -709,7 +751,7 @@ private fun DigitPicker(
                 ) {
                     Text(
                         text = wrap(value + i).toString(),
-                        color = if (active && dist < 0.5f) Accent else Color.White,
+                        color = if (wheel.active && dist < 0.5f) Accent else Color.White,
                         fontSize = 28.sp,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,

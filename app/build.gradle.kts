@@ -11,8 +11,9 @@ android {
         applicationId = "com.richardgg.weartimer"
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        val run = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = run
+        versionName = "1.$run"
     }
 
     buildTypes {

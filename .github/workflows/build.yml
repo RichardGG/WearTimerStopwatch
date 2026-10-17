@@ -23,16 +23,17 @@ jobs:
       - name: Build APK
         run: gradle --no-daemon assembleRelease
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk WearTimerStopwatch.apk
+        run: cp app/build/outputs/apk/release/app-release.apk WearTimerStopwatch-v1.${{ github.run_number }}.apk
       - uses: actions/upload-artifact@v4
         with:
           name: WearTimerStopwatch-apk
-          path: WearTimerStopwatch.apk
-      - name: Publish to latest release
+          path: WearTimerStopwatch-v1.${{ github.run_number }}.apk
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest build (#${{ github.run_number }})
+          tag_name: v1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: v1.${{ github.run_number }}
           body: Sideloadable APK built from commit ${{ github.sha }}
-          files: WearTimerStopwatch.apk
+          files: WearTimerStopwatch-v1.${{ github.run_number }}.apk
           make_latest: true
